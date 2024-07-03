@@ -1,5 +1,8 @@
 import re
 from datetime import datetime, timezone
+import time
+
+from collections import defaultdict
 
 import requests
 from selectolax.parser import HTMLParser
@@ -201,6 +204,157 @@ class Vlr:
         if status != 200:
             raise Exception("API response: {}".format(status))
         return data
+    @staticmethod
+
+    def vlr_match_results_in_depth(startpg, endpg):
+        with requests.Session() as session:
+            pgcount = startpg
+            session.headers.update(headers)
+            params= {'page': str(pgcount)}
+            url = "https://www.vlr.gg/matches/results"
+            result = []
+
+            resp = session.get(url, params=params)
+            html = HTMLParser(resp.text)
+            status = resp.status_code
+            if status != 200:
+                raise Exception("API response: {}".format(status))
+            while status == 200:
+                print(params)
+                if not html.css("a.wf-module-item"):
+                    break
+                if endpg and endpg < pgcount:
+                    break
+                for item in html.css("a.wf-module-item"):
+                    url_path = item.attributes["href"]
+
+                    eta = item.css_first("div.ml-eta").text() + " ago"
+
+                    rounds = item.css_first("div.match-item-event-series").text()
+                    rounds = rounds.replace("\u2013", "-")
+                    rounds = rounds.replace("\n", " ").replace("\t", "")
+                    try:
+                        team_array = (
+                            item.css_first("div.match-item-vs")
+                            .css_first("div:nth-child(2)")
+                            .text()
+                        )
+                    except Exception:  # Replace bare except with except Exception
+                        team_array = "TBD"
+                    team_array = team_array.replace("\t", " ").replace("\n", " ")
+                    team_array = team_array.strip().split("                                  ")
+                    # 1st item in team_array is first team
+                    team1 = team_array[0]
+                    # 2nd item in team_array is first team score
+                    score1 = team_array[1].replace(" ", "").strip()
+                    # 3rd item in team_array is second team
+                    team2 = team_array[4].strip()
+                    # 4th item in team_array is second team score
+                    score2 = team_array[-1].replace(" ", "").strip()
+
+                    # Creating a list of the classes of the flag elements.
+                    flag_list = [
+                        flag_parent.attributes["class"].replace(" mod-", "_")
+                        for flag_parent in item.css(".flag")
+                    ]
+                    flag1 = flag_list[0]
+                    flag2 = flag_list[1]
+
+                    result.append(
+                        {
+                            "team1": team1,
+                            "team2": team2,
+                            "score1": score1,
+                            "score2": score2,
+                            "flag1": flag1,
+                            "flag2": flag2,
+                            "time_completed": eta,
+                            "round_info": rounds,
+                            "match_page": url_path,
+                        }
+                    )
+                pgcount +=1
+                params['page'] = str(pgcount)
+                print(params)
+                resp = session.get(url, params=params)
+                html = HTMLParser(resp.text)
+                status = resp.status_code
+                time.sleep(0.1)
+
+            for game in result:
+                match_page = game["match_page"]
+                resp = session.get(f"https://www.vlr.gg{match_page}", headers=headers)
+                print(f"https://www.vlr.gg{match_page}")
+                html = HTMLParser(resp.text)
+                status = resp.status_code
+                if status != 200:
+                    raise Exception("API response: {}".format(status))
+
+                info = defaultdict(dict)
+                blockno = 1
+                maps = []
+
+                for map in html.css("div.vm-stats-gamesnav-item.js-map-switch:not(:first-child)"):
+                    mapname = map.text().strip()[1:].strip()
+                    maps.append(mapname)
+
+                mapidx = 0
+
+                if len(maps) != 0:
+                    maps.insert(1, "All maps")
+                else:
+                    maps = ["All maps"]
+
+                currmap= info[maps[mapidx]]
+                for team in html.css("table.wf-table-inset.mod-overview"):
+                    playerlist = []
+                    for player in team.css("td.mod-player"):
+                        teamname = player.css_first("div.ge-text-light").text().strip()
+                        playerign = player.css_first("div.text-of").text().strip()
+                        playerlist.append(f"{teamname} {playerign}")
+                    agentlist = []
+                    for agents in team.css("td.mod-agents"):
+                        playeragents = []
+                        for agent in agents.css("img"):
+                            playeragents.append(agent.attributes['title'])
+                        agentlist.append(playeragents)
+                        
+                    labels_to_index = {"Average Combat Score":2, "Kills":3, "Deaths":4, "Assists":5, "Kill, Assist, Trade, Survive %":7, "Ave dmg per round":8, "headshot %":9, "First kill":10, "First Death":11}
+                    side_index = ["Total", "T-side", "CT-side"]
+                    stat_node = team.css("span.stats-sq")
+                    for num_player ,player in enumerate(playerlist):
+                        curr = 13 * num_player
+                        curr_player_map = {'agent(s)':agentlist[num_player]}
+                        for entry in labels_to_index:
+                            index = labels_to_index[entry]
+                            if curr+index >= len(stat_node):
+                                break
+                            curr_node = stat_node[curr+index]
+                            for num_node, node in enumerate(curr_node.css("span.side")):
+                                if node.text().isascii():
+                                    curr_player_map[f'{entry} {side_index[num_node]}'] = node.text()
+                        if curr_player_map != {}:
+                            currmap[player] = curr_player_map
+                    if blockno % 2 == 0:
+                        mapidx += 1
+                        if (mapidx >= len(maps)):
+                            break
+                        currmap = info[f'{maps[mapidx]}']
+                    blockno += 1
+        
+                topop = []
+                for entry in info:
+                    if info[entry] == {}:
+                        topop.append(entry)
+                for entry in topop:
+                    info.pop(entry)
+                game.update(info)
+                time.sleep(0.1)
+
+        segments = {"status": status, "segments": result}
+        data = {"data": segments}
+        return data
+
 
     @staticmethod
     def vlr_stats(region: str, timespan: int):
